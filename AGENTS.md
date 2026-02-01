@@ -33,6 +33,7 @@ When adding commands, ensure they do not rewrite repo-tracked files unexpectedly
   - stable non-zero exit code
   - guidance on alternatives
 - Never silently ignore user intent.
+- Treat `cli.js` in this repo as the **canonical reference** for stream-json event shapes and ordering; match its behavior whenever implementing or modifying stream-json output.
 
 ## Security Rules (Non-Negotiable)
 
