@@ -90,6 +90,7 @@ Key behaviors to support early:
 - `--input-format`: `text|stream-json` (print-mode).
 - Session flags: `--continue`, `--resume`, `--session-id`.
 - Tool gating: `--tools`, `--allowedTools`, `--disallowedTools`, `--permission-mode`.
+- Stream-json auth updates: `--enable-auth-status`.
 
 ## Roadmap (high level)
 
