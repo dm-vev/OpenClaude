@@ -257,6 +257,8 @@ type HookResponseEvent struct {
 type ControlRequestEvent struct {
 	// Type is always "control_request".
 	Type string `json:"type"`
+	// RequestID correlates responses to the request.
+	RequestID string `json:"request_id"`
 	// Request carries the control request payload.
 	Request any `json:"request"`
 }
@@ -273,8 +275,8 @@ type ControlResponseEvent struct {
 type ControlCancelRequestEvent struct {
 	// Type is always "control_cancel_request".
 	Type string `json:"type"`
-	// Request carries the control cancel payload.
-	Request any `json:"request"`
+	// RequestID identifies the request being cancelled.
+	RequestID string `json:"request_id"`
 }
 
 // KeepAliveEvent represents a stream-json keep-alive event.

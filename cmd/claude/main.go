@@ -53,6 +53,8 @@ type options struct {
 	DisableSlashCommands bool
 	// DisallowedTools blocks specific tools even if available.
 	DisallowedTools string
+	// EnableAuthStatus emits auth_status events in stream-json output.
+	EnableAuthStatus bool
 	// FallbackModel is used on retryable errors in print mode.
 	FallbackModel string
 	// FileSpecs defines preloaded file resources.
@@ -153,6 +155,7 @@ func applyFlags(flags *pflag.FlagSet, opts *options) {
 	flags.StringVar(&opts.DebugFile, "debug-file", "", "Write debug logs to a file")
 	flags.BoolVar(&opts.DisableSlashCommands, "disable-slash-commands", false, "Disable slash commands")
 	flags.StringVar(&opts.DisallowedTools, "disallowedTools", "", "Disallowed tools list")
+	flags.BoolVar(&opts.EnableAuthStatus, "enable-auth-status", false, "Emit auth_status events in stream-json output")
 	flags.StringVar(&opts.FallbackModel, "fallback-model", "", "Fallback model")
 	flags.StringSliceVar(&opts.FileSpecs, "file", nil, "File resources to download at startup")
 	flags.BoolVar(&opts.ForkSession, "fork-session", false, "Fork session on resume")
@@ -281,18 +284,9 @@ func runRoot(cmd *cobra.Command, opts *options, args []string) error {
 	rootDirs := append([]string{cwd}, opts.AddDirs...)
 	sandbox := tools.NewSandbox(rootDirs)
 
-	availableTools, toolNames, err := buildTools(opts, sandbox, cwd, store, sessionID, permissionMode)
+	availableTools, _, err := buildTools(opts, sandbox, cwd, store, sessionID, permissionMode)
 	if err != nil {
 		return err
-	}
-
-	// Build a base system prompt and apply overrides.
-	systemPrompt := agent.DefaultSystemPrompt(toolNames)
-	if opts.SystemPrompt != "" {
-		systemPrompt = opts.SystemPrompt
-	}
-	if opts.AppendSystemPrompt != "" {
-		systemPrompt = systemPrompt + "\n\n" + opts.AppendSystemPrompt
 	}
 
 	client := openai.NewClient(providerCfg.APIBaseURL, providerCfg.APIKey, time.Duration(providerCfg.TimeoutMS)*time.Millisecond)
@@ -306,9 +300,12 @@ func runRoot(cmd *cobra.Command, opts *options, args []string) error {
 		MaxBudgetUSD: opts.MaxBudgetUSD,
 	}
 
+	// Build a base system prompt and apply overrides.
+	systemPrompt := resolveSystemPrompt(opts, runner)
+
 	// Dispatch to print or interactive mode.
 	if opts.Print {
-		return runPrintMode(cmd, opts, runner, history, systemPrompt, model, sessionID, store)
+		return runPrintMode(cmd, opts, runner, history, systemPrompt, model, sessionID, store, settings)
 	}
 	return runInteractive(opts, runner, history, systemPrompt, model, sessionID, store)
 }
@@ -445,9 +442,10 @@ func runPrintMode(
 	model string,
 	sessionID string,
 	store *session.Store,
+	settings *config.Settings,
 ) error {
 	if opts.OutputFormat == "stream-json" {
-		return runPrintModeStreamJSON(cmd, opts, runner, history, systemPrompt, model, sessionID, store)
+		return runPrintModeStreamJSON(cmd, opts, runner, history, systemPrompt, model, sessionID, store, settings)
 	}
 
 	inputMessages, err := readInputMessages(cmd, opts)
@@ -509,33 +507,80 @@ func runPrintModeStreamJSON(
 	model string,
 	sessionID string,
 	store *session.Store,
+	settings *config.Settings,
 ) error {
 	// Claude Code requires --verbose when streaming JSON in print mode.
 	if !opts.Verbose {
 		return fmt.Errorf("when using --print, --output-format=stream-json requires --verbose")
 	}
 
-	inputMessages, err := readInputMessages(cmd, opts)
-	if err != nil {
-		return err
+	var (
+		inputMessages []openai.Message
+		streamInput   *streamJSONInput
+		err           error
+	)
+	// Parse stream-json input when requested to capture control requests and UUIDs.
+	if opts.InputFormat == "stream-json" {
+		streamInput, err = readStreamInputWithControl(os.Stdin)
+		if err != nil {
+			return err
+		}
+		inputMessages = streamInput.Messages
+	} else {
+		inputMessages, err = readInputMessages(cmd, opts)
+		if err != nil {
+			return err
+		}
 	}
 
+	writer := streamjson.NewWriter(os.Stdout)
+	streamed := false
+	modelUsed := model
+	authStatusEmitted := false
+
+	// Replay input control responses before initialization when requested.
+	if opts.ReplayUserMessages && streamInput != nil {
+		for _, response := range streamInput.ControlResponses {
+			controlEvent := streamjson.ControlResponseEvent{
+				Type:     "control_response",
+				Response: response,
+			}
+			if err := writer.Write(controlEvent); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Apply control requests before building the system:init event.
+	if streamInput != nil {
+		modelUsed, authStatusEmitted, err = applyStreamJSONControlRequests(streamInput, writer, opts, runner, settings, sessionID, modelUsed)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Recompute the system prompt after any control-request overrides.
+	systemPrompt = resolveSystemPrompt(opts, runner)
 	messages := append(history, inputMessages...)
 	messages = ensureSystem(messages, systemPrompt)
 	runner.AuthorizeTool = func(name string, args json.RawMessage) (bool, error) {
 		return false, fmt.Errorf("tool %s requires confirmation in print mode", name)
 	}
 
-	writer := streamjson.NewWriter(os.Stdout)
-	streamed := false
-
-	initEvent := buildSystemInitEvent(opts, runner, model, sessionID)
+	initEvent := buildSystemInitEvent(opts, runner, modelUsed, sessionID, settings)
 	if err := writer.Write(initEvent); err != nil {
 		return err
 	}
+	if opts.EnableAuthStatus && !authStatusEmitted {
+		if err := emitAuthStatus(writer, sessionID, false, "", ""); err != nil {
+			return err
+		}
+		authStatusEmitted = true
+	}
 
+	// Replay user messages using stable UUIDs for stream-json consumers.
 	if opts.ReplayUserMessages {
-		for _, msg := range messages {
+		for _, msg := range history {
 			if msg.Role != "user" {
 				continue
 			}
@@ -552,15 +597,52 @@ func runPrintModeStreamJSON(
 				return err
 			}
 		}
+		if streamInput != nil {
+			for _, user := range streamInput.UserMessages {
+				uuid := user.UUID
+				if uuid == "" {
+					uuid = streamjson.NewUUID()
+				}
+				userEvent := streamjson.UserEvent{
+					Type:            "user",
+					Message:         streamjson.BuildUserMessage(user.Message),
+					SessionID:       sessionID,
+					ParentToolUseID: nil,
+					UUID:            uuid,
+					IsReplay:        true,
+					IsSynthetic:     user.IsSynthetic,
+				}
+				if err := writer.Write(userEvent); err != nil {
+					return err
+				}
+			}
+		} else {
+			for _, msg := range inputMessages {
+				if msg.Role != "user" {
+					continue
+				}
+				userEvent := streamjson.UserEvent{
+					Type:            "user",
+					Message:         streamjson.BuildUserMessage(msg),
+					SessionID:       sessionID,
+					ParentToolUseID: nil,
+					UUID:            streamjson.NewUUID(),
+					IsReplay:        true,
+					IsSynthetic:     false,
+				}
+				if err := writer.Write(userEvent); err != nil {
+					return err
+				}
+			}
+		}
 	}
 
 	startTime := time.Now()
-	modelUsed := model
 
 	emitter := streamjson.NewOpenAIStreamEmitter(writer, opts.IncludePartialMessages, sessionID)
 	callbacks := buildStreamCallbacks(emitter, writer, sessionID, &streamed)
 
-	result, err := runner.RunStream(context.Background(), messages, "", model, runner.ToolRunner != nil, callbacks)
+	result, err := runner.RunStream(context.Background(), messages, "", modelUsed, runner.ToolRunner != nil, callbacks)
 	if err != nil && opts.FallbackModel != "" && isRetryableError(err) && !streamed {
 		modelUsed = opts.FallbackModel
 		emitter = streamjson.NewOpenAIStreamEmitter(writer, opts.IncludePartialMessages, sessionID)
@@ -777,7 +859,7 @@ func buildToolUseSummary(event agent.ToolEvent) string {
 }
 
 // buildSystemInitEvent constructs the initial stream-json system event.
-func buildSystemInitEvent(opts *options, runner *agent.Runner, model string, sessionID string) streamjson.SystemInitEvent {
+func buildSystemInitEvent(opts *options, runner *agent.Runner, model string, sessionID string, settings *config.Settings) streamjson.SystemInitEvent {
 	return streamjson.SystemInitEvent{
 		Type:              "system",
 		Subtype:           "init",
@@ -791,10 +873,10 @@ func buildSystemInitEvent(opts *options, runner *agent.Runner, model string, ses
 		APIKeySource:      "config",
 		Betas:             opts.Betas,
 		ClaudeCodeVersion: version,
-		OutputStyle:       "default",
-		Agents:            []any{},
-		Skills:            []any{},
-		Plugins:           []any{},
+		OutputStyle:       resolveOutputStyle(settings),
+		Agents:            listAgentNames(opts),
+		Skills:            listSkillNames(settings),
+		Plugins:           listPluginDescriptors(opts, settings),
 		UUID:              streamjson.NewUUID(),
 	}
 }
@@ -834,28 +916,11 @@ func readInputMessages(cmd *cobra.Command, opts *options) ([]openai.Message, err
 
 // readStreamInput consumes stream-json input into user messages.
 func readStreamInput(reader io.Reader) ([]openai.Message, error) {
-	var messages []openai.Message
-	scanner := bufio.NewScanner(reader)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		var payload map[string]any
-		if err := json.Unmarshal([]byte(line), &payload); err != nil {
-			return nil, fmt.Errorf("parse stream input: %w", err)
-		}
-		if msg, ok := parseStreamMessage(payload); ok {
-			messages = append(messages, msg)
-		}
+	parsed, err := readStreamInputWithControl(reader)
+	if err != nil {
+		return nil, err
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read stream input: %w", err)
-	}
-	if len(messages) == 0 {
-		return nil, errors.New("no user messages found in stream input")
-	}
-	return messages, nil
+	return parsed.Messages, nil
 }
 
 // parseStreamMessage extracts a user message from stream-json events.
