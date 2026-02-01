@@ -63,6 +63,8 @@ type options struct {
 	ForkSession bool
 	// IncludePartialMessages toggles partial message streaming in print mode.
 	IncludePartialMessages bool
+	// HookConfig stores hook definitions from stream-json control requests.
+	HookConfig *streamJSONHookConfig
 	// InputFormat controls how prompts are read in print mode.
 	InputFormat string
 	// JSONSchema provides structured output validation schema.
@@ -508,7 +510,7 @@ func runPrintModeStreamJSON(
 	sessionID string,
 	store *session.Store,
 	settings *config.Settings,
-) error {
+) (returnErr error) {
 	// Claude Code requires --verbose when streaming JSON in print mode.
 	if !opts.Verbose {
 		return fmt.Errorf("when using --print, --output-format=stream-json requires --verbose")
@@ -537,6 +539,18 @@ func runPrintModeStreamJSON(
 	streamed := false
 	modelUsed := model
 	authStatusEmitted := false
+	hookEmitter := newStreamJSONHookEmitter(writer, sessionID, opts.HookConfig)
+	var keepAlive *keepAliveEmitter
+
+	// Ensure keep-alive emissions are stopped before returning.
+	defer func() {
+		if keepAlive == nil {
+			return
+		}
+		if err := keepAlive.Stop(); err != nil && returnErr == nil {
+			returnErr = err
+		}
+	}()
 
 	// Replay input control responses before initialization when requested.
 	if opts.ReplayUserMessages && streamInput != nil {
@@ -577,6 +591,9 @@ func runPrintModeStreamJSON(
 		}
 		authStatusEmitted = true
 	}
+
+	// Start keep-alive emissions after initialization output is sent.
+	keepAlive = startKeepAlive(writer, time.Second)
 
 	// Replay user messages using stable UUIDs for stream-json consumers.
 	if opts.ReplayUserMessages {
@@ -640,13 +657,13 @@ func runPrintModeStreamJSON(
 	startTime := time.Now()
 
 	emitter := streamjson.NewOpenAIStreamEmitter(writer, opts.IncludePartialMessages, sessionID)
-	callbacks := buildStreamCallbacks(emitter, writer, sessionID, &streamed)
+	callbacks := buildStreamCallbacks(emitter, writer, sessionID, &streamed, hookEmitter)
 
 	result, err := runner.RunStream(context.Background(), messages, "", modelUsed, runner.ToolRunner != nil, callbacks)
 	if err != nil && opts.FallbackModel != "" && isRetryableError(err) && !streamed {
 		modelUsed = opts.FallbackModel
 		emitter = streamjson.NewOpenAIStreamEmitter(writer, opts.IncludePartialMessages, sessionID)
-		callbacks = buildStreamCallbacks(emitter, writer, sessionID, &streamed)
+		callbacks = buildStreamCallbacks(emitter, writer, sessionID, &streamed, hookEmitter)
 		result, err = runner.RunStream(
 			context.Background(),
 			messages,
@@ -737,6 +754,7 @@ func buildStreamCallbacks(
 	writer *streamjson.Writer,
 	sessionID string,
 	streamed *bool,
+	hookEmitter *streamJSONHookEmitter,
 ) *agent.StreamCallbacks {
 	toolUseIDs := []string{}
 	return &agent.StreamCallbacks{
@@ -754,6 +772,12 @@ func buildStreamCallbacks(
 			return nil
 		},
 		OnToolCall: func(event agent.ToolEvent) error {
+			// Emit pre-tool hook events before tool progress starts.
+			if hookEmitter != nil {
+				if err := hookEmitter.EmitPreToolUse(event.ToolName); err != nil {
+					return err
+				}
+			}
 			progressEvent := streamjson.ProgressEvent{
 				Type: "progress",
 				Data: streamjson.ProgressData{
@@ -798,6 +822,18 @@ func buildStreamCallbacks(
 			return nil
 		},
 		OnToolResult: func(event agent.ToolEvent, _ openai.Message) error {
+			// Emit post-tool hook events after execution finishes.
+			if hookEmitter != nil {
+				var err error
+				if event.IsError {
+					err = hookEmitter.EmitPostToolUseFailure(event.ToolName)
+				} else {
+					err = hookEmitter.EmitPostToolUse(event.ToolName)
+				}
+				if err != nil {
+					return err
+				}
+			}
 			progressEvent := streamjson.ProgressEvent{
 				Type: "progress",
 				Data: streamjson.ProgressData{

@@ -150,6 +150,9 @@ func applyInitializeRequest(request map[string]any, opts *options, resolvedModel
 			opts.JSONSchema = string(encoded)
 		}
 	}
+	if hooks, ok := request["hooks"]; ok {
+		opts.HookConfig = parseStreamJSONHookConfig(hooks)
+	}
 }
 
 // buildInitializeControlResponse assembles the initialize response payload.
