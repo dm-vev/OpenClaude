@@ -89,6 +89,44 @@ type SystemEvent struct {
 	UUID string `json:"uuid"`
 }
 
+// SystemInitEvent represents the stream-json initialization event.
+type SystemInitEvent struct {
+	// Type is always "system".
+	Type string `json:"type"`
+	// Subtype is always "init".
+	Subtype string `json:"subtype"`
+	// CWD is the active working directory.
+	CWD string `json:"cwd"`
+	// SessionID scopes the event to a session.
+	SessionID string `json:"session_id"`
+	// Tools lists available tool names.
+	Tools []string `json:"tools"`
+	// MCPServers lists connected MCP server descriptors.
+	MCPServers []any `json:"mcp_servers"`
+	// Model reports the active model identifier.
+	Model string `json:"model"`
+	// PermissionMode reflects the active permission mode.
+	PermissionMode string `json:"permissionMode"`
+	// SlashCommands lists available slash commands.
+	SlashCommands []string `json:"slash_commands"`
+	// APIKeySource reports where the API key was loaded from.
+	APIKeySource string `json:"apiKeySource"`
+	// Betas lists enabled beta flags.
+	Betas []string `json:"betas"`
+	// ClaudeCodeVersion reports the CLI version string.
+	ClaudeCodeVersion string `json:"claude_code_version"`
+	// OutputStyle reports the output style key.
+	OutputStyle string `json:"output_style"`
+	// Agents lists configured agent profiles.
+	Agents []any `json:"agents"`
+	// Skills lists available skills.
+	Skills []any `json:"skills"`
+	// Plugins lists configured plugins.
+	Plugins []any `json:"plugins"`
+	// UUID uniquely identifies the event.
+	UUID string `json:"uuid"`
+}
+
 // ResultEvent represents the terminal stream-json result.
 type ResultEvent struct {
 	// Type is always "result".

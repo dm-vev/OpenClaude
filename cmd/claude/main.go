@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -528,15 +529,8 @@ func runPrintModeStreamJSON(
 	writer := streamjson.NewWriter(os.Stdout)
 	streamed := false
 
-	statusEvent := streamjson.SystemEvent{
-		Type:           "system",
-		Subtype:        "status",
-		Status:         nil,
-		PermissionMode: string(runner.Permissions.Mode),
-		SessionID:      sessionID,
-		UUID:           streamjson.NewUUID(),
-	}
-	if err := writer.Write(statusEvent); err != nil {
+	initEvent := buildSystemInitEvent(opts, runner, model, sessionID)
+	if err := writer.Write(initEvent); err != nil {
 		return err
 	}
 
@@ -719,6 +713,42 @@ func buildStreamCallbacks(
 			return nil
 		},
 	}
+}
+
+// buildSystemInitEvent constructs the initial stream-json system event.
+func buildSystemInitEvent(opts *options, runner *agent.Runner, model string, sessionID string) streamjson.SystemInitEvent {
+	return streamjson.SystemInitEvent{
+		Type:              "system",
+		Subtype:           "init",
+		CWD:               mustCwd(),
+		SessionID:         sessionID,
+		Tools:             listToolNames(runner),
+		MCPServers:        []any{},
+		Model:             model,
+		PermissionMode:    string(runner.Permissions.Mode),
+		SlashCommands:     []string{},
+		APIKeySource:      "config",
+		Betas:             opts.Betas,
+		ClaudeCodeVersion: version,
+		OutputStyle:       "default",
+		Agents:            []any{},
+		Skills:            []any{},
+		Plugins:           []any{},
+		UUID:              streamjson.NewUUID(),
+	}
+}
+
+// listToolNames returns a sorted list of tool names from the runner.
+func listToolNames(runner *agent.Runner) []string {
+	if runner == nil || runner.ToolRunner == nil {
+		return nil
+	}
+	names := make([]string, 0, len(runner.ToolRunner.Tools))
+	for name := range runner.ToolRunner.Tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // readInputMessages parses prompt input for print mode.
