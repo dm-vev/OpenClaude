@@ -127,6 +127,12 @@ type StreamEvent struct {
 	Type string `json:"type"`
 	// Event contains the streaming payload.
 	Event any `json:"event"`
+	// SessionID scopes the event to a session.
+	SessionID string `json:"session_id"`
+	// ParentToolUseID is reserved for nested tool calls.
+	ParentToolUseID any `json:"parent_tool_use_id"`
+	// UUID uniquely identifies the event.
+	UUID string `json:"uuid"`
 }
 
 // MessageStartEvent represents the start of a streaming message.
@@ -181,6 +187,8 @@ type StreamDelta struct {
 	Type string `json:"type"`
 	// Text is the streamed text chunk.
 	Text string `json:"text,omitempty"`
+	// PartialJSON carries incremental JSON for tool inputs.
+	PartialJSON string `json:"partial_json,omitempty"`
 }
 
 // ContentBlockStopEvent represents the end of a content block.
@@ -353,7 +361,7 @@ func ExtractText(content any) string {
 }
 
 // BuildStreamEventsForText synthesizes stream_event messages for text output.
-func BuildStreamEventsForText(text string, model string) []StreamEvent {
+func BuildStreamEventsForText(text string, model string, sessionID string) []StreamEvent {
 	if text == "" {
 		return nil
 	}
@@ -361,7 +369,10 @@ func BuildStreamEventsForText(text string, model string) []StreamEvent {
 	messageID := NewUUID()
 	events := []StreamEvent{
 		{
-			Type: "stream_event",
+			Type:            "stream_event",
+			SessionID:       sessionID,
+			ParentToolUseID: nil,
+			UUID:            NewUUID(),
 			Event: MessageStartEvent{
 				Type: "message_start",
 				Message: StreamMessage{
@@ -376,7 +387,10 @@ func BuildStreamEventsForText(text string, model string) []StreamEvent {
 			},
 		},
 		{
-			Type: "stream_event",
+			Type:            "stream_event",
+			SessionID:       sessionID,
+			ParentToolUseID: nil,
+			UUID:            NewUUID(),
 			Event: ContentBlockStartEvent{
 				Type:  "content_block_start",
 				Index: 0,
@@ -390,7 +404,10 @@ func BuildStreamEventsForText(text string, model string) []StreamEvent {
 
 	for _, chunk := range splitText(text, 60) {
 		events = append(events, StreamEvent{
-			Type: "stream_event",
+			Type:            "stream_event",
+			SessionID:       sessionID,
+			ParentToolUseID: nil,
+			UUID:            NewUUID(),
 			Event: ContentBlockDeltaEvent{
 				Type:  "content_block_delta",
 				Index: 0,
@@ -404,14 +421,20 @@ func BuildStreamEventsForText(text string, model string) []StreamEvent {
 
 	events = append(events,
 		StreamEvent{
-			Type: "stream_event",
+			Type:            "stream_event",
+			SessionID:       sessionID,
+			ParentToolUseID: nil,
+			UUID:            NewUUID(),
 			Event: ContentBlockStopEvent{
 				Type:  "content_block_stop",
 				Index: 0,
 			},
 		},
 		StreamEvent{
-			Type: "stream_event",
+			Type:            "stream_event",
+			SessionID:       sessionID,
+			ParentToolUseID: nil,
+			UUID:            NewUUID(),
 			Event: MessageDeltaEvent{
 				Type: "message_delta",
 				Delta: MessageDelta{
@@ -421,8 +444,11 @@ func BuildStreamEventsForText(text string, model string) []StreamEvent {
 			},
 		},
 		StreamEvent{
-			Type:  "stream_event",
-			Event: MessageStopEvent{Type: "message_stop"},
+			Type:            "stream_event",
+			SessionID:       sessionID,
+			ParentToolUseID: nil,
+			UUID:            NewUUID(),
+			Event:           MessageStopEvent{Type: "message_stop"},
 		},
 	)
 

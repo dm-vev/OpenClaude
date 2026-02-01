@@ -445,9 +445,8 @@ func runPrintMode(
 	sessionID string,
 	store *session.Store,
 ) error {
-	// Claude Code requires --verbose when streaming JSON in print mode.
-	if opts.OutputFormat == "stream-json" && !opts.Verbose {
-		return fmt.Errorf("when using --print, --output-format=stream-json requires --verbose")
+	if opts.OutputFormat == "stream-json" {
+		return runPrintModeStreamJSON(cmd, opts, runner, history, systemPrompt, model, sessionID, store)
 	}
 
 	inputMessages, err := readInputMessages(cmd, opts)
@@ -497,6 +496,106 @@ func runPrintMode(
 		sessionID,
 		modelUsed,
 	)
+}
+
+// runPrintModeStreamJSON handles print mode with streaming JSON output.
+func runPrintModeStreamJSON(
+	cmd *cobra.Command,
+	opts *options,
+	runner *agent.Runner,
+	history []openai.Message,
+	systemPrompt string,
+	model string,
+	sessionID string,
+	store *session.Store,
+) error {
+	// Claude Code requires --verbose when streaming JSON in print mode.
+	if !opts.Verbose {
+		return fmt.Errorf("when using --print, --output-format=stream-json requires --verbose")
+	}
+
+	inputMessages, err := readInputMessages(cmd, opts)
+	if err != nil {
+		return err
+	}
+
+	messages := append(history, inputMessages...)
+	messages = ensureSystem(messages, systemPrompt)
+	runner.AuthorizeTool = func(name string, args json.RawMessage) (bool, error) {
+		return false, fmt.Errorf("tool %s requires confirmation in print mode", name)
+	}
+
+	writer := streamjson.NewWriter(os.Stdout)
+	streamed := false
+
+	statusEvent := streamjson.SystemEvent{
+		Type:           "system",
+		Subtype:        "status",
+		Status:         nil,
+		PermissionMode: string(runner.Permissions.Mode),
+		SessionID:      sessionID,
+		UUID:           streamjson.NewUUID(),
+	}
+	if err := writer.Write(statusEvent); err != nil {
+		return err
+	}
+
+	if opts.ReplayUserMessages {
+		for _, msg := range messages {
+			if msg.Role != "user" {
+				continue
+			}
+			userEvent := streamjson.UserEvent{
+				Type:            "user",
+				Message:         streamjson.BuildUserMessage(msg),
+				SessionID:       sessionID,
+				ParentToolUseID: nil,
+				UUID:            streamjson.NewUUID(),
+				IsReplay:        true,
+				IsSynthetic:     false,
+			}
+			if err := writer.Write(userEvent); err != nil {
+				return err
+			}
+		}
+	}
+
+	startTime := time.Now()
+	modelUsed := model
+
+	emitter := streamjson.NewOpenAIStreamEmitter(writer, opts.IncludePartialMessages, sessionID)
+	callbacks := buildStreamCallbacks(emitter, writer, sessionID, &streamed)
+
+	result, err := runner.RunStream(context.Background(), messages, "", model, runner.ToolRunner != nil, callbacks)
+	if err != nil && opts.FallbackModel != "" && isRetryableError(err) && !streamed {
+		modelUsed = opts.FallbackModel
+		emitter = streamjson.NewOpenAIStreamEmitter(writer, opts.IncludePartialMessages, sessionID)
+		callbacks = buildStreamCallbacks(emitter, writer, sessionID, &streamed)
+		result, err = runner.RunStream(
+			context.Background(),
+			messages,
+			"",
+			opts.FallbackModel,
+			runner.ToolRunner != nil,
+			callbacks,
+		)
+	}
+	if err != nil {
+		return writeStreamJSONErrorResult(writer, err, sessionID, modelUsed, time.Since(startTime))
+	}
+
+	if !opts.NoSessionPersistence {
+		newMessages := result.Messages
+		if len(history) > 0 && len(result.Messages) >= len(history) {
+			newMessages = result.Messages[len(history):]
+		}
+		if err := persistSession(store, sessionID, newMessages, result.Events); err != nil {
+			return err
+		}
+		_ = store.SaveLastSession(session.ProjectHash(mustCwd()), sessionID)
+	}
+
+	return writeStreamJSONResult(writer, result, sessionID, modelUsed)
 }
 
 // runInteractive reads prompts from stdin and maintains a live session.
@@ -554,6 +653,72 @@ func runInteractive(
 		}
 	}
 	return nil
+}
+
+// buildStreamCallbacks wires stream-json emission into the streaming agent loop.
+func buildStreamCallbacks(
+	emitter *streamjson.OpenAIStreamEmitter,
+	writer *streamjson.Writer,
+	sessionID string,
+	streamed *bool,
+) *agent.StreamCallbacks {
+	return &agent.StreamCallbacks{
+		OnStreamStart: func(model string) error {
+			emitter.Begin(model)
+			return nil
+		},
+		OnStreamEvent: func(event openai.StreamResponse) error {
+			if err := emitter.Handle(event); err != nil {
+				return err
+			}
+			if emitter.Streamed() {
+				*streamed = true
+			}
+			return nil
+		},
+		OnStreamComplete: func(summary agent.StreamSummary) error {
+			message, ok, err := emitter.Finalize()
+			if err != nil {
+				return err
+			}
+			if !ok {
+				message = streamjson.BuildAssistantMessage(summary.Message)
+			}
+			assistantEvent := streamjson.AssistantEvent{
+				Type:            "assistant",
+				Message:         message,
+				SessionID:       sessionID,
+				ParentToolUseID: nil,
+				UUID:            streamjson.NewUUID(),
+				Error:           false,
+			}
+			if err := writer.Write(assistantEvent); err != nil {
+				return err
+			}
+			*streamed = true
+			return nil
+		},
+		OnToolResult: func(event agent.ToolEvent, _ openai.Message) error {
+			userEvent := streamjson.UserEvent{
+				Type: "user",
+				Message: streamjson.BuildToolResultMessage(
+					event.ToolID,
+					event.Result,
+					event.IsError,
+				),
+				SessionID:       sessionID,
+				ParentToolUseID: nil,
+				UUID:            streamjson.NewUUID(),
+				IsReplay:        false,
+				IsSynthetic:     false,
+			}
+			if err := writer.Write(userEvent); err != nil {
+				return err
+			}
+			*streamed = true
+			return nil
+		},
+	}
 }
 
 // readInputMessages parses prompt input for print mode.
@@ -768,7 +933,7 @@ func writeStreamJSON(
 			// Stream partial text chunks before emitting the final assistant event.
 			text := extractMessageText(msg)
 			if includePartial {
-				for _, event := range streamjson.BuildStreamEventsForText(text, model) {
+				for _, event := range streamjson.BuildStreamEventsForText(text, model, sessionID) {
 					if err := writer.Write(event); err != nil {
 						return err
 					}
@@ -873,6 +1038,68 @@ func writeStreamJSONError(
 	}
 
 	// Translate the error into a Claude Code result subtype.
+	subtype, isError, errorsList := mapStreamJSONError(err)
+	resultEvent := streamjson.ResultEvent{
+		Type:              "result",
+		Subtype:           subtype,
+		IsError:           isError,
+		DurationMS:        duration.Milliseconds(),
+		DurationAPIMS:     0,
+		NumTurns:          0,
+		SessionID:         sessionID,
+		TotalCostUSD:      0,
+		Usage:             openai.Usage{},
+		ModelUsage:        map[string]openai.Usage{model: openai.Usage{}},
+		PermissionDenials: []any{},
+		UUID:              streamjson.NewUUID(),
+		Errors:            errorsList,
+	}
+	return writer.Write(resultEvent)
+}
+
+// writeStreamJSONResult emits only the terminal stream-json result event.
+func writeStreamJSONResult(
+	writer *streamjson.Writer,
+	result *agent.RunResult,
+	sessionID string,
+	model string,
+) error {
+	if writer == nil {
+		return fmt.Errorf("stream-json writer is required")
+	}
+	modelUsage := result.ModelUsage
+	if modelUsage == nil {
+		modelUsage = map[string]openai.Usage{model: result.TotalUsage}
+	}
+	resultEvent := streamjson.ResultEvent{
+		Type:              "result",
+		Subtype:           "success",
+		IsError:           false,
+		DurationMS:        result.Duration.Milliseconds(),
+		DurationAPIMS:     result.APIDuration.Milliseconds(),
+		NumTurns:          result.NumTurns,
+		Result:            formatContent(result.Final.Content),
+		SessionID:         sessionID,
+		TotalCostUSD:      result.CostUSD,
+		Usage:             result.TotalUsage,
+		ModelUsage:        modelUsage,
+		PermissionDenials: []any{},
+		UUID:              streamjson.NewUUID(),
+	}
+	return writer.Write(resultEvent)
+}
+
+// writeStreamJSONErrorResult emits a stream-json error result event without status.
+func writeStreamJSONErrorResult(
+	writer *streamjson.Writer,
+	err error,
+	sessionID string,
+	model string,
+	duration time.Duration,
+) error {
+	if writer == nil {
+		return fmt.Errorf("stream-json writer is required")
+	}
 	subtype, isError, errorsList := mapStreamJSONError(err)
 	resultEvent := streamjson.ResultEvent{
 		Type:              "result",
