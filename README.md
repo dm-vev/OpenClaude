@@ -73,6 +73,8 @@ Stream JSON (Claude Code-compatible):
 
 Note: `--output-format=stream-json` requires `--verbose` in print mode.
 Note: `--include-partial-messages` enables `stream_event` lines for streaming deltas.
+Note: stream-json output emits periodic `keep_alive` heartbeats while streaming.
+Note: when stream-json input sends `initialize` hooks, the CLI emits hook lifecycle events around tool use.
 
 ## Intended CLI Compatibility
 
@@ -91,6 +93,7 @@ Key behaviors to support early:
 - Session flags: `--continue`, `--resume`, `--session-id`.
 - Tool gating: `--tools`, `--allowedTools`, `--disallowedTools`, `--permission-mode`.
 - Stream-json auth updates: `--enable-auth-status`.
+- Stream-json hooks and keep-alives: `hook_started`/`hook_response` system events and `keep_alive` heartbeats.
 
 ## Roadmap (high level)
 
