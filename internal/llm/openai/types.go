@@ -12,6 +12,8 @@ type ChatRequest struct {
 	ToolChoice any `json:"tool_choice,omitempty"`
 	// Stream toggles server-sent events in the response.
 	Stream bool `json:"stream,omitempty"`
+	// StreamOptions configures optional streaming behavior such as usage reporting.
+	StreamOptions *StreamOptions `json:"stream_options,omitempty"`
 	// Temperature controls randomness, if supported by the backend.
 	Temperature *float64 `json:"temperature,omitempty"`
 	// MaxTokens limits the model output, if supported by the backend.
