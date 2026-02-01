@@ -44,7 +44,7 @@ func TestBuildAssistantMessageWithToolUse(t *testing.T) {
 
 func TestBuildStreamEventsForText(t *testing.T) {
 	// Arrange a short text payload.
-	events := BuildStreamEventsForText("hello", "model-x")
+	events := BuildStreamEventsForText("hello", "model-x", "session-1")
 
 	// Assert a minimal stream sequence is present.
 	if len(events) != 6 {
