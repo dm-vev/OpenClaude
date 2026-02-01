@@ -462,15 +462,17 @@ func runPrintMode(
 	}
 
 	startTime := time.Now()
+	modelUsed := model
 	result, err := runner.Run(context.Background(), messages, "", model, runner.ToolRunner != nil)
 	if err != nil {
 		if opts.FallbackModel != "" && isRetryableError(err) {
+			modelUsed = opts.FallbackModel
 			result, err = runner.Run(context.Background(), messages, "", opts.FallbackModel, runner.ToolRunner != nil)
 		}
 	}
 	if err != nil {
 		if opts.OutputFormat == "stream-json" {
-			return writeStreamJSONError(err, opts, inputMessages, sessionID, model, time.Since(startTime))
+			return writeStreamJSONError(err, opts, inputMessages, sessionID, modelUsed, time.Since(startTime))
 		}
 		return err
 	}
@@ -493,7 +495,7 @@ func runPrintMode(
 		opts.IncludePartialMessages,
 		string(runner.Permissions.Mode),
 		sessionID,
-		model,
+		modelUsed,
 	)
 }
 
