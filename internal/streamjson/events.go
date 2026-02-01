@@ -1,10 +1,12 @@
 package streamjson
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 
@@ -419,6 +421,9 @@ type MessageStopEvent struct {
 
 // Writer emits stream-json events as JSON Lines.
 type Writer struct {
+	// mu serializes writes to prevent JSON line interleaving.
+	mu sync.Mutex
+	// writer is the underlying output destination.
 	writer io.Writer
 }
 
@@ -429,11 +434,16 @@ func NewWriter(writer io.Writer) *Writer {
 
 // Write emits a single event as a JSON line.
 func (w *Writer) Write(event any) error {
-	data, err := json.Marshal(event)
-	if err != nil {
-		return fmt.Errorf("marshal stream-json event: %w", err)
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	// Disable HTML escaping to match Claude Code's JSON.stringify output.
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(event); err != nil {
+		return fmt.Errorf("encode stream-json event: %w", err)
 	}
-	if _, err := w.writer.Write(append(data, '\n')); err != nil {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, err := w.writer.Write(buffer.Bytes()); err != nil {
 		return fmt.Errorf("write stream-json event: %w", err)
 	}
 	return nil
