@@ -19,6 +19,7 @@ import (
 	"github.com/openclaude/openclaude/internal/config"
 	"github.com/openclaude/openclaude/internal/llm/openai"
 	"github.com/openclaude/openclaude/internal/session"
+	"github.com/openclaude/openclaude/internal/streamjson"
 	"github.com/openclaude/openclaude/internal/tools"
 )
 
@@ -444,6 +445,11 @@ func runPrintMode(
 	sessionID string,
 	store *session.Store,
 ) error {
+	// Claude Code requires --verbose when streaming JSON in print mode.
+	if opts.OutputFormat == "stream-json" && !opts.Verbose {
+		return fmt.Errorf("when using --print, --output-format=stream-json requires --verbose")
+	}
+
 	inputMessages, err := readInputMessages(cmd, opts)
 	if err != nil {
 		return err
@@ -455,13 +461,17 @@ func runPrintMode(
 		return false, fmt.Errorf("tool %s requires confirmation in print mode", name)
 	}
 
+	startTime := time.Now()
 	result, err := runner.Run(context.Background(), messages, "", model, runner.ToolRunner != nil)
 	if err != nil {
 		if opts.FallbackModel != "" && isRetryableError(err) {
-			result, err = runner.Run(context.Background(), messages, systemPrompt, opts.FallbackModel, runner.ToolRunner != nil)
+			result, err = runner.Run(context.Background(), messages, "", opts.FallbackModel, runner.ToolRunner != nil)
 		}
 	}
 	if err != nil {
+		if opts.OutputFormat == "stream-json" {
+			return writeStreamJSONError(err, opts, inputMessages, sessionID, model, time.Since(startTime))
+		}
 		return err
 	}
 
@@ -476,7 +486,15 @@ func runPrintMode(
 		_ = store.SaveLastSession(session.ProjectHash(mustCwd()), sessionID)
 	}
 
-	return writeOutput(opts.OutputFormat, result, opts.ReplayUserMessages, sessionID, model)
+	return writeOutput(
+		opts.OutputFormat,
+		result,
+		opts.ReplayUserMessages,
+		opts.IncludePartialMessages,
+		string(runner.Permissions.Mode),
+		sessionID,
+		model,
+	)
 }
 
 // runInteractive reads prompts from stdin and maintains a live session.
@@ -584,23 +602,37 @@ func readStreamInput(reader io.Reader) ([]openai.Message, error) {
 
 // parseStreamMessage extracts a user message from stream-json events.
 func parseStreamMessage(payload map[string]any) (openai.Message, bool) {
+	// Support direct role/content payloads.
 	if role, ok := payload["role"].(string); ok {
-		content, _ := payload["content"].(string)
 		if role == "user" {
+			content := streamjson.ExtractText(payload["content"])
 			return openai.Message{Role: "user", Content: content}, true
 		}
 	}
+
+	// Support stream-json envelope with a message field.
 	if msg, ok := payload["message"].(map[string]any); ok {
 		role, _ := msg["role"].(string)
-		content, _ := msg["content"].(string)
 		if role == "user" {
+			content := streamjson.ExtractText(msg["content"])
 			return openai.Message{Role: "user", Content: content}, true
 		}
 	}
-	if typ, ok := payload["type"].(string); ok && typ == "user_message" {
-		content, _ := payload["content"].(string)
-		return openai.Message{Role: "user", Content: content}, true
+
+	// Support explicit user event envelopes.
+	if typ, ok := payload["type"].(string); ok {
+		switch typ {
+		case "user":
+			if msg, ok := payload["message"].(map[string]any); ok {
+				content := streamjson.ExtractText(msg["content"])
+				return openai.Message{Role: "user", Content: content}, true
+			}
+		case "user_message":
+			content := streamjson.ExtractText(payload["content"])
+			return openai.Message{Role: "user", Content: content}, true
+		}
 	}
+
 	return openai.Message{}, false
 }
 
@@ -646,7 +678,15 @@ func loadSessionMessages(store *session.Store, sessionID string) ([]openai.Messa
 }
 
 // writeOutput formats the final response according to the selected format.
-func writeOutput(format string, result *agent.RunResult, replayUser bool, sessionID string, model string) error {
+func writeOutput(
+	format string,
+	result *agent.RunResult,
+	replayUser bool,
+	includePartial bool,
+	permissionMode string,
+	sessionID string,
+	model string,
+) error {
 	switch format {
 	case "text":
 		fmt.Println(formatContent(result.Final.Content))
@@ -655,37 +695,219 @@ func writeOutput(format string, result *agent.RunResult, replayUser bool, sessio
 			"session_id": sessionID,
 			"model":      model,
 			"final":      result.Final.Content,
-			"usage":      result.Usage,
+			"usage":      result.TotalUsage,
 			"cost_usd":   result.CostUSD,
 		}
 		return writeJSON(payload)
 	case "stream-json":
-		if replayUser {
-			for _, msg := range result.Messages {
-				if msg.Role == "user" {
-					if err := writeJSON(map[string]any{
-						"type":    "user_message",
-						"content": formatContent(msg.Content),
-					}); err != nil {
-						return err
-					}
-				}
-			}
-		}
-		for _, event := range result.Events {
-			if err := writeJSON(event); err != nil {
-				return err
-			}
-		}
-		finalEvent := map[string]any{
-			"type":    "final",
-			"content": formatContent(result.Final.Content),
-		}
-		return writeJSON(finalEvent)
+		return writeStreamJSON(result, replayUser, includePartial, permissionMode, sessionID, model)
 	default:
 		return fmt.Errorf("unsupported output format: %s", format)
 	}
 	return nil
+}
+
+// writeStreamJSON emits stream-json events that mirror Claude Code output.
+func writeStreamJSON(
+	result *agent.RunResult,
+	replayUser bool,
+	includePartial bool,
+	permissionMode string,
+	sessionID string,
+	model string,
+) error {
+	writer := streamjson.NewWriter(os.Stdout)
+
+	// Emit an initial status event to communicate the permission mode.
+	statusEvent := streamjson.SystemEvent{
+		Type:           "system",
+		Subtype:        "status",
+		Status:         nil,
+		PermissionMode: permissionMode,
+		SessionID:      sessionID,
+		UUID:           streamjson.NewUUID(),
+	}
+	if err := writer.Write(statusEvent); err != nil {
+		return err
+	}
+
+	// Build a tool result lookup for error flags.
+	toolErrors := make(map[string]bool)
+	for _, event := range result.Events {
+		if event.Type == "tool_result" && event.ToolID != "" {
+			toolErrors[event.ToolID] = event.IsError
+		}
+	}
+
+	// Emit message events in order.
+	for _, msg := range result.Messages {
+		switch msg.Role {
+		case "system":
+			// System messages are not emitted unless explicitly required.
+			continue
+		case "user":
+			if !replayUser {
+				// Skip user messages unless replay was requested.
+				continue
+			}
+			userEvent := streamjson.UserEvent{
+				Type:            "user",
+				Message:         streamjson.BuildUserMessage(msg),
+				SessionID:       sessionID,
+				ParentToolUseID: nil,
+				UUID:            streamjson.NewUUID(),
+				IsReplay:        true,
+				IsSynthetic:     false,
+			}
+			if err := writer.Write(userEvent); err != nil {
+				return err
+			}
+		case "assistant":
+			// Stream partial text chunks before emitting the final assistant event.
+			text := extractMessageText(msg)
+			if includePartial {
+				for _, event := range streamjson.BuildStreamEventsForText(text, model) {
+					if err := writer.Write(event); err != nil {
+						return err
+					}
+				}
+			}
+			// Emit the full assistant message as an Anthropic-style payload.
+			assistantEvent := streamjson.AssistantEvent{
+				Type:            "assistant",
+				Message:         streamjson.BuildAssistantMessage(msg),
+				SessionID:       sessionID,
+				ParentToolUseID: nil,
+				UUID:            streamjson.NewUUID(),
+				Error:           false,
+			}
+			if err := writer.Write(assistantEvent); err != nil {
+				return err
+			}
+		case "tool":
+			// Tool results are emitted as synthetic user messages with tool_result blocks.
+			toolText := formatContent(msg.Content)
+			userEvent := streamjson.UserEvent{
+				Type: "user",
+				Message: streamjson.BuildToolResultMessage(
+					msg.ToolCallID,
+					toolText,
+					toolErrors[msg.ToolCallID],
+				),
+				SessionID:       sessionID,
+				ParentToolUseID: nil,
+				UUID:            streamjson.NewUUID(),
+				IsReplay:        false,
+				IsSynthetic:     false,
+			}
+			if err := writer.Write(userEvent); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Emit the final result event.
+	resultEvent := streamjson.ResultEvent{
+		Type:              "result",
+		Subtype:           "success",
+		IsError:           false,
+		DurationMS:        result.Duration.Milliseconds(),
+		DurationAPIMS:     result.APIDuration.Milliseconds(),
+		NumTurns:          result.NumTurns,
+		Result:            formatContent(result.Final.Content),
+		SessionID:         sessionID,
+		TotalCostUSD:      result.CostUSD,
+		Usage:             result.TotalUsage,
+		ModelUsage:        result.ModelUsage,
+		PermissionDenials: []any{},
+		UUID:              streamjson.NewUUID(),
+	}
+	return writer.Write(resultEvent)
+}
+
+// writeStreamJSONError emits a stream-json error result event.
+func writeStreamJSONError(
+	err error,
+	opts *options,
+	inputMessages []openai.Message,
+	sessionID string,
+	model string,
+	duration time.Duration,
+) error {
+	writer := streamjson.NewWriter(os.Stdout)
+
+	// Emit an initial status event to communicate the permission mode.
+	statusEvent := streamjson.SystemEvent{
+		Type:           "system",
+		Subtype:        "status",
+		Status:         nil,
+		PermissionMode: opts.PermissionMode,
+		SessionID:      sessionID,
+		UUID:           streamjson.NewUUID(),
+	}
+	if writeErr := writer.Write(statusEvent); writeErr != nil {
+		return writeErr
+	}
+
+	// Optionally replay user messages for stream-json compatibility.
+	if opts.ReplayUserMessages {
+		for _, msg := range inputMessages {
+			if msg.Role != "user" {
+				continue
+			}
+			userEvent := streamjson.UserEvent{
+				Type:            "user",
+				Message:         streamjson.BuildUserMessage(msg),
+				SessionID:       sessionID,
+				ParentToolUseID: nil,
+				UUID:            streamjson.NewUUID(),
+				IsReplay:        true,
+				IsSynthetic:     false,
+			}
+			if writeErr := writer.Write(userEvent); writeErr != nil {
+				return writeErr
+			}
+		}
+	}
+
+	// Translate the error into a Claude Code result subtype.
+	subtype, isError, errorsList := mapStreamJSONError(err)
+	resultEvent := streamjson.ResultEvent{
+		Type:              "result",
+		Subtype:           subtype,
+		IsError:           isError,
+		DurationMS:        duration.Milliseconds(),
+		DurationAPIMS:     0,
+		NumTurns:          0,
+		SessionID:         sessionID,
+		TotalCostUSD:      0,
+		Usage:             openai.Usage{},
+		ModelUsage:        map[string]openai.Usage{model: openai.Usage{}},
+		PermissionDenials: []any{},
+		UUID:              streamjson.NewUUID(),
+		Errors:            errorsList,
+	}
+	return writer.Write(resultEvent)
+}
+
+// mapStreamJSONError maps errors into Claude Code result subtypes.
+func mapStreamJSONError(err error) (string, bool, []string) {
+	switch {
+	case errors.Is(err, agent.ErrMaxTurns):
+		return "error_max_turns", false, []string{}
+	case errors.Is(err, agent.ErrMaxBudget):
+		return "error_max_budget_usd", false, []string{}
+	default:
+		return "error_during_execution", false, []string{err.Error()}
+	}
+}
+
+// extractMessageText returns the message text for partial streaming.
+func extractMessageText(message openai.Message) string {
+	if text, ok := message.Content.(string); ok {
+		return text
+	}
+	return streamjson.ExtractText(message.Content)
 }
 
 // writeJSON writes a single JSON line to stdout.
