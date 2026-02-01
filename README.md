@@ -72,6 +72,7 @@ Stream JSON (Claude Code-compatible):
 ```
 
 Note: `--output-format=stream-json` requires `--verbose` in print mode.
+Note: `--include-partial-messages` enables `stream_event` lines for streaming deltas.
 
 ## Intended CLI Compatibility
 
