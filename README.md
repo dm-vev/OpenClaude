@@ -65,6 +65,14 @@ Print mode (one-shot):
 ./bin/claude -p "hello"
 ```
 
+Stream JSON (Claude Code-compatible):
+
+```bash
+./bin/claude -p "hello" --output-format=stream-json --verbose --include-partial-messages
+```
+
+Note: `--output-format=stream-json` requires `--verbose` in print mode.
+
 ## Intended CLI Compatibility
 
 The target shape matches Claude Code:
