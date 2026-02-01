@@ -16,6 +16,8 @@ type StreamCallbacks struct {
 	OnStreamStart func(model string) error
 	// OnStreamEvent receives raw OpenAI stream events.
 	OnStreamEvent func(event openai.StreamResponse) error
+	// OnToolCall fires when a tool call is issued by the model.
+	OnToolCall func(event ToolEvent) error
 	// OnStreamComplete fires after the assistant message is assembled.
 	OnStreamComplete func(summary StreamSummary) error
 	// OnToolResult fires after a tool result is appended to messages.
@@ -146,6 +148,12 @@ func (r *Runner) RunStream(
 				Arguments: args,
 			}
 			result.Events = append(result.Events, event)
+
+			if callbacks != nil && callbacks.OnToolCall != nil {
+				if err := callbacks.OnToolCall(event); err != nil {
+					return nil, fmt.Errorf("tool call callback: %w", err)
+				}
+			}
 
 			// Plan mode must not execute any tools.
 			if r.Permissions.Mode == tools.PermissionPlan {

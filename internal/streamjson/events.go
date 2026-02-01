@@ -127,6 +127,162 @@ type SystemInitEvent struct {
 	UUID string `json:"uuid"`
 }
 
+// ProgressEvent represents a stream-json progress event.
+type ProgressEvent struct {
+	// Type is always "progress".
+	Type string `json:"type"`
+	// Data carries progress metadata for the event.
+	Data ProgressData `json:"data"`
+	// SessionID scopes the event to a session.
+	SessionID string `json:"session_id"`
+	// ParentToolUseID links progress events to a tool use.
+	ParentToolUseID string `json:"parent_tool_use_id,omitempty"`
+	// UUID uniquely identifies the event.
+	UUID string `json:"uuid"`
+}
+
+// ProgressData describes the progress payload.
+type ProgressData struct {
+	// Type identifies the progress payload type.
+	Type string `json:"type"`
+	// ToolName identifies the tool being executed.
+	ToolName string `json:"tool_name,omitempty"`
+	// Status summarizes the progress status.
+	Status string `json:"status,omitempty"`
+	// Message provides a human-readable description.
+	Message string `json:"message,omitempty"`
+}
+
+// ToolUseSummaryEvent summarizes completed tool usage.
+type ToolUseSummaryEvent struct {
+	// Type is always "tool_use_summary".
+	Type string `json:"type"`
+	// Summary provides a human-readable summary.
+	Summary string `json:"summary"`
+	// PrecedingToolUseIDs lists tool use ids in order.
+	PrecedingToolUseIDs []string `json:"preceding_tool_use_ids"`
+	// SessionID scopes the event to a session.
+	SessionID string `json:"session_id"`
+	// UUID uniquely identifies the event.
+	UUID string `json:"uuid"`
+}
+
+// AuthStatusEvent reports authentication status in stream-json output.
+type AuthStatusEvent struct {
+	// Type is always "auth_status".
+	Type string `json:"type"`
+	// IsAuthenticating reports whether authentication is in progress.
+	IsAuthenticating bool `json:"isAuthenticating"`
+	// Output carries optional status output.
+	Output string `json:"output,omitempty"`
+	// Error carries optional error details.
+	Error string `json:"error,omitempty"`
+	// UUID uniquely identifies the event.
+	UUID string `json:"uuid"`
+	// SessionID scopes the event to a session.
+	SessionID string `json:"session_id"`
+}
+
+// HookStartedEvent reports a hook start in stream-json output.
+type HookStartedEvent struct {
+	// Type is always "system".
+	Type string `json:"type"`
+	// Subtype is always "hook_started".
+	Subtype string `json:"subtype"`
+	// HookID identifies the hook invocation.
+	HookID string `json:"hook_id"`
+	// HookName names the hook.
+	HookName string `json:"hook_name"`
+	// HookEvent identifies the hook lifecycle event.
+	HookEvent string `json:"hook_event"`
+	// UUID uniquely identifies the event.
+	UUID string `json:"uuid"`
+	// SessionID scopes the event to a session.
+	SessionID string `json:"session_id"`
+}
+
+// HookProgressEvent reports incremental hook output.
+type HookProgressEvent struct {
+	// Type is always "system".
+	Type string `json:"type"`
+	// Subtype is always "hook_progress".
+	Subtype string `json:"subtype"`
+	// HookID identifies the hook invocation.
+	HookID string `json:"hook_id"`
+	// HookName names the hook.
+	HookName string `json:"hook_name"`
+	// HookEvent identifies the hook lifecycle event.
+	HookEvent string `json:"hook_event"`
+	// Stdout captures stdout output.
+	Stdout string `json:"stdout,omitempty"`
+	// Stderr captures stderr output.
+	Stderr string `json:"stderr,omitempty"`
+	// Output carries any aggregated output.
+	Output string `json:"output,omitempty"`
+	// UUID uniquely identifies the event.
+	UUID string `json:"uuid"`
+	// SessionID scopes the event to a session.
+	SessionID string `json:"session_id"`
+}
+
+// HookResponseEvent reports hook completion output.
+type HookResponseEvent struct {
+	// Type is always "system".
+	Type string `json:"type"`
+	// Subtype is always "hook_response".
+	Subtype string `json:"subtype"`
+	// HookID identifies the hook invocation.
+	HookID string `json:"hook_id"`
+	// HookName names the hook.
+	HookName string `json:"hook_name"`
+	// HookEvent identifies the hook lifecycle event.
+	HookEvent string `json:"hook_event"`
+	// Output carries hook output.
+	Output string `json:"output,omitempty"`
+	// Stdout captures stdout output.
+	Stdout string `json:"stdout,omitempty"`
+	// Stderr captures stderr output.
+	Stderr string `json:"stderr,omitempty"`
+	// ExitCode reports the hook process exit code.
+	ExitCode int `json:"exit_code,omitempty"`
+	// Outcome reports the hook outcome string.
+	Outcome string `json:"outcome,omitempty"`
+	// UUID uniquely identifies the event.
+	UUID string `json:"uuid"`
+	// SessionID scopes the event to a session.
+	SessionID string `json:"session_id"`
+}
+
+// ControlRequestEvent represents a stream-json control request.
+type ControlRequestEvent struct {
+	// Type is always "control_request".
+	Type string `json:"type"`
+	// Request carries the control request payload.
+	Request any `json:"request"`
+}
+
+// ControlResponseEvent represents a stream-json control response.
+type ControlResponseEvent struct {
+	// Type is always "control_response".
+	Type string `json:"type"`
+	// Response carries the control response payload.
+	Response any `json:"response"`
+}
+
+// ControlCancelRequestEvent represents a stream-json control cancel request.
+type ControlCancelRequestEvent struct {
+	// Type is always "control_cancel_request".
+	Type string `json:"type"`
+	// Request carries the control cancel payload.
+	Request any `json:"request"`
+}
+
+// KeepAliveEvent represents a stream-json keep-alive event.
+type KeepAliveEvent struct {
+	// Type is always "keep_alive".
+	Type string `json:"type"`
+}
+
 // ResultEvent represents the terminal stream-json result.
 type ResultEvent struct {
 	// Type is always "result".

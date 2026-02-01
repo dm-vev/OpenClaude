@@ -656,6 +656,7 @@ func buildStreamCallbacks(
 	sessionID string,
 	streamed *bool,
 ) *agent.StreamCallbacks {
+	toolUseIDs := []string{}
 	return &agent.StreamCallbacks{
 		OnStreamStart: func(model string) error {
 			emitter.Begin(model)
@@ -668,6 +669,28 @@ func buildStreamCallbacks(
 			if emitter.Streamed() {
 				*streamed = true
 			}
+			return nil
+		},
+		OnToolCall: func(event agent.ToolEvent) error {
+			progressEvent := streamjson.ProgressEvent{
+				Type: "progress",
+				Data: streamjson.ProgressData{
+					Type:     "tool_progress",
+					ToolName: event.ToolName,
+					Status:   "started",
+					Message:  fmt.Sprintf("Starting tool %s", event.ToolName),
+				},
+				SessionID:       sessionID,
+				ParentToolUseID: event.ToolID,
+				UUID:            streamjson.NewUUID(),
+			}
+			if err := writer.Write(progressEvent); err != nil {
+				return err
+			}
+			if event.ToolID != "" {
+				toolUseIDs = append(toolUseIDs, event.ToolID)
+			}
+			*streamed = true
 			return nil
 		},
 		OnStreamComplete: func(summary agent.StreamSummary) error {
@@ -693,6 +716,21 @@ func buildStreamCallbacks(
 			return nil
 		},
 		OnToolResult: func(event agent.ToolEvent, _ openai.Message) error {
+			progressEvent := streamjson.ProgressEvent{
+				Type: "progress",
+				Data: streamjson.ProgressData{
+					Type:     "tool_progress",
+					ToolName: event.ToolName,
+					Status:   "completed",
+					Message:  fmt.Sprintf("Completed tool %s", event.ToolName),
+				},
+				SessionID:       sessionID,
+				ParentToolUseID: event.ToolID,
+				UUID:            streamjson.NewUUID(),
+			}
+			if err := writer.Write(progressEvent); err != nil {
+				return err
+			}
 			userEvent := streamjson.UserEvent{
 				Type: "user",
 				Message: streamjson.BuildToolResultMessage(
@@ -709,10 +747,33 @@ func buildStreamCallbacks(
 			if err := writer.Write(userEvent); err != nil {
 				return err
 			}
+			if event.ToolID != "" {
+				summaryEvent := streamjson.ToolUseSummaryEvent{
+					Type:                "tool_use_summary",
+					Summary:             buildToolUseSummary(event),
+					PrecedingToolUseIDs: append([]string(nil), toolUseIDs...),
+					SessionID:           sessionID,
+					UUID:                streamjson.NewUUID(),
+				}
+				if err := writer.Write(summaryEvent); err != nil {
+					return err
+				}
+			}
 			*streamed = true
 			return nil
 		},
 	}
+}
+
+// buildToolUseSummary returns a compact summary for tool usage events.
+func buildToolUseSummary(event agent.ToolEvent) string {
+	if event.ToolName == "" {
+		return "Tool completed"
+	}
+	if event.IsError {
+		return fmt.Sprintf("Tool %s failed", event.ToolName)
+	}
+	return fmt.Sprintf("Tool %s completed", event.ToolName)
 }
 
 // buildSystemInitEvent constructs the initial stream-json system event.
