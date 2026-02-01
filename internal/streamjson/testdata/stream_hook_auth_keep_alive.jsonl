@@ -1,0 +1,5 @@
+{"type":"system","subtype":"hook_started","hook_id":"hook-1","hook_name":"preflight","hook_event":"before_prompt","uuid":"<uuid>","session_id":"session-1"}
+{"type":"system","subtype":"hook_progress","hook_id":"hook-1","hook_name":"preflight","hook_event":"before_prompt","stdout":"running\n","stderr":"warn\n","output":"progress","uuid":"<uuid>","session_id":"session-1"}
+{"type":"system","subtype":"hook_response","hook_id":"hook-1","hook_name":"preflight","hook_event":"before_prompt","output":"done","stdout":"ok\n","stderr":"warn\n","exit_code":1,"outcome":"failed","uuid":"<uuid>","session_id":"session-1"}
+{"type":"auth_status","isAuthenticating":true,"output":"Waiting for login","error":"Missing token","uuid":"<uuid>","session_id":"session-1"}
+{"type":"keep_alive"}
