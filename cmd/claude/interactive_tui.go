@@ -17,6 +17,7 @@ import (
 	"github.com/openclaude/openclaude/internal/agent"
 	"github.com/openclaude/openclaude/internal/llm/openai"
 	"github.com/openclaude/openclaude/internal/session"
+	"github.com/openclaude/openclaude/internal/tools"
 )
 
 // tuiMessage is a rendered chat entry in the interactive UI.
@@ -117,6 +118,10 @@ type tuiModel struct {
 	height int
 	// activePane identifies which pane is focused.
 	activePane string
+	// permissionMode reports the current tool permission mode.
+	permissionMode string
+	// planMode indicates whether plan-only mode is active.
+	planMode bool
 	// running indicates an in-flight request.
 	running bool
 	// streamBuffer accumulates streamed assistant text.
@@ -194,6 +199,10 @@ func newTUIModel(
 		chatAutoScroll:   true,
 		toolAutoScroll:   true,
 	}
+	if runner != nil {
+		modelState.permissionMode = string(runner.Permissions.Mode)
+	}
+	modelState.refreshPlanMode()
 	modelState.historyIndex = len(modelState.inputHistory)
 	modelState.bootstrapHistory()
 	return modelState
@@ -633,6 +642,7 @@ func (m *tuiModel) appendToolEvent(event agent.ToolEvent) {
 		m.toolLines = m.toolLines[len(m.toolLines)-200:]
 	}
 	m.refreshTools()
+	m.refreshPlanMode()
 }
 
 // refreshChat rebuilds the chat viewport content.
@@ -841,6 +851,14 @@ func (m *tuiModel) renderStatus() string {
 // renderStatusInfo assembles auxiliary status information.
 func (m *tuiModel) renderStatusInfo() string {
 	parts := []string{}
+	if m.permissionMode != "" {
+		parts = append(parts, fmt.Sprintf("perm:%s", m.permissionMode))
+	}
+	if m.planMode {
+		parts = append(parts, "plan:on")
+	} else {
+		parts = append(parts, "plan:off")
+	}
 	if m.activePane != "" {
 		parts = append(parts, fmt.Sprintf("focus:%s", m.activePane))
 	}
@@ -851,6 +869,15 @@ func (m *tuiModel) renderStatusInfo() string {
 		parts = append(parts, fmt.Sprintf("cost:$%.4f", m.totalCost))
 	}
 	return strings.Join(parts, " ")
+}
+
+// refreshPlanMode syncs the plan-only indicator from the session store.
+func (m *tuiModel) refreshPlanMode() {
+	if m.store == nil || m.sessionID == "" {
+		m.planMode = false
+		return
+	}
+	m.planMode = tools.IsPlanMode(m.store, m.sessionID)
 }
 
 // renderPane formats a bordered pane with a title.

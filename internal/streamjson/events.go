@@ -352,7 +352,7 @@ type ResultEvent struct {
 	// NumTurns is the number of assistant turns processed.
 	NumTurns int `json:"num_turns"`
 	// Result contains the final assistant text.
-	Result string `json:"result,omitempty"`
+	Result string `json:"result"`
 	// SessionID scopes the event to a session.
 	SessionID string `json:"session_id"`
 	// TotalCostUSD reports the estimated total cost.
