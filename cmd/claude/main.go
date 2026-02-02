@@ -1070,51 +1070,7 @@ func runInteractive(
 	sessionID string,
 	store *session.Store,
 ) error {
-	reader := bufio.NewScanner(os.Stdin)
-	messages := ensureSystem(history, systemPrompt)
-
-	for {
-		fmt.Fprint(os.Stdout, "\n> ")
-		if !reader.Scan() {
-			break
-		}
-		line := strings.TrimSpace(reader.Text())
-		if line == "" {
-			continue
-		}
-		previousLen := len(messages)
-		userMsg := openai.Message{Role: "user", Content: line}
-		messages = append(messages, userMsg)
-		runner.AuthorizeTool = func(name string, args json.RawMessage) (bool, error) {
-			if !runner.Permissions.ShouldPrompt(name) {
-				return true, nil
-			}
-			fmt.Fprintf(os.Stdout, "Allow tool %s? [y/N]: ", name)
-			resp, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-			resp = strings.TrimSpace(strings.ToLower(resp))
-			return resp == "y" || resp == "yes", nil
-		}
-
-		result, err := runner.Run(context.Background(), messages, "", model, runner.ToolRunner != nil)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			continue
-		}
-		messages = result.Messages
-		fmt.Fprintln(os.Stdout, formatContent(result.Final.Content))
-
-		if !opts.NoSessionPersistence {
-			newMessages := result.Messages
-			if previousLen > 0 && len(result.Messages) >= previousLen {
-				newMessages = result.Messages[previousLen:]
-			}
-			if err := persistSession(store, sessionID, newMessages, result.Events); err != nil {
-				fmt.Fprintln(os.Stderr, err)
-			}
-			_ = store.SaveLastSession(session.ProjectHash(mustCwd()), sessionID)
-		}
-	}
-	return nil
+	return runInteractiveTUI(opts, runner, history, systemPrompt, model, sessionID, store)
 }
 
 // buildStreamCallbacks wires stream-json emission into the streaming agent loop.
