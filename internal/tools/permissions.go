@@ -24,6 +24,7 @@ type Permissions struct {
 }
 
 // ShouldPrompt returns true if a tool should require user approval.
+// It encodes the default Claude Code prompt behavior for risky tools.
 func (p Permissions) ShouldPrompt(toolName string) bool {
 	switch p.Mode {
 	case PermissionBypass, PermissionDontAsk:
@@ -33,7 +34,7 @@ func (p Permissions) ShouldPrompt(toolName string) bool {
 	case PermissionPlan:
 		return false
 	default:
-		return toolName == "Bash" || toolName == "Edit"
+		return toolName == "Bash" || toolName == "Edit" || toolName == "Write" || toolName == "NotebookEdit"
 	}
 }
 

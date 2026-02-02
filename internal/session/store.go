@@ -20,6 +20,19 @@ type Store struct {
 	BaseDir string
 }
 
+// streamJSONRecordType marks stream-json line records stored in session JSONL.
+// Keeping a distinct type avoids mixing with message/tool events.
+const streamJSONRecordType = "stream_json"
+
+// StreamJSONRecord wraps a stream-json line for session persistence.
+// Lines are stored verbatim so replay can emit identical JSON text.
+type StreamJSONRecord struct {
+	// Type tags the record as stream-json so loaders can filter it.
+	Type string `json:"type"`
+	// Line holds the raw JSON line without a trailing newline.
+	Line string `json:"line"`
+}
+
 // NewStore constructs a Store using the default base directory.
 func NewStore() (*Store, error) {
 	home, err := os.UserHomeDir()
@@ -68,6 +81,21 @@ func (s *Store) AppendEvent(sessionID string, event any) error {
 	return nil
 }
 
+// AppendStreamJSONLine stores a stream-json line for later replay.
+// It trims surrounding whitespace so empty lines do not pollute the session log.
+func (s *Store) AppendStreamJSONLine(sessionID string, line string) error {
+	// Persist only non-empty lines to avoid cluttering the session log.
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return nil
+	}
+	record := StreamJSONRecord{
+		Type: streamJSONRecordType,
+		Line: trimmed,
+	}
+	return s.AppendEvent(sessionID, record)
+}
+
 // LoadEvents reads all JSONL events from a session file.
 func (s *Store) LoadEvents(sessionID string) ([]json.RawMessage, error) {
 	path := s.SessionPath(sessionID)
@@ -79,6 +107,10 @@ func (s *Store) LoadEvents(sessionID string) ([]json.RawMessage, error) {
 
 	var events []json.RawMessage
 	scanner := bufio.NewScanner(file)
+	// Increase the scanner buffer so large stream-json lines are not dropped.
+	// The cap is intentionally generous to handle tool outputs without truncation.
+	const maxEventSize = 10 * 1024 * 1024
+	scanner.Buffer(make([]byte, 0, 64*1024), maxEventSize)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -90,6 +122,48 @@ func (s *Store) LoadEvents(sessionID string) ([]json.RawMessage, error) {
 		return nil, fmt.Errorf("read session file: %w", err)
 	}
 	return events, nil
+}
+
+// LoadStreamJSONLines returns stored stream-json lines in session order.
+// It skips malformed entries so replay is resilient to partial writes.
+func (s *Store) LoadStreamJSONLines(sessionID string) ([]string, error) {
+	events, err := s.LoadEvents(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	lines := make([]string, 0, len(events))
+	for _, raw := range events {
+		var record StreamJSONRecord
+		// Ignore malformed entries to keep replay resilient.
+		if err := json.Unmarshal(raw, &record); err != nil {
+			continue
+		}
+		if record.Type != streamJSONRecordType || record.Line == "" {
+			continue
+		}
+		lines = append(lines, record.Line)
+	}
+	return lines, nil
+}
+
+// CloneSession copies events from one session id to another.
+func (s *Store) CloneSession(fromSessionID string, toSessionID string) error {
+	if fromSessionID == "" || toSessionID == "" {
+		return errors.New("session id required")
+	}
+	if fromSessionID == toSessionID {
+		return nil
+	}
+	events, err := s.LoadEvents(fromSessionID)
+	if err != nil {
+		return err
+	}
+	for _, event := range events {
+		if err := s.AppendEvent(toSessionID, event); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // SaveLastSession stores the last session id for a project hash.

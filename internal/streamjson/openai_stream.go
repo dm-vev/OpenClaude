@@ -316,32 +316,38 @@ func (state *openAIStreamState) ensureToolBlock(
 }
 
 // stopBlocks emits content_block_stop events for active blocks.
+// Blocks are stopped in the same order they were started to keep output deterministic.
 func (state *openAIStreamState) stopBlocks() error {
-	if state.hasTextBlock {
-		if err := state.write(StreamEvent{
-			Type: "stream_event",
-			Event: ContentBlockStopEvent{
-				Type:  "content_block_stop",
-				Index: state.textBlockIndex,
-			},
-		}); err != nil {
-			return err
-		}
-	}
-	for toolIndex, blockIndex := range state.toolBlockIndex {
-		blockState := state.toolBlocks[toolIndex]
-		if blockState == nil || blockState.stopped {
-			continue
-		}
-		blockState.stopped = true
-		if err := state.write(StreamEvent{
-			Type: "stream_event",
-			Event: ContentBlockStopEvent{
-				Type:  "content_block_stop",
-				Index: blockIndex,
-			},
-		}); err != nil {
-			return err
+	for blockIndex, block := range state.blocks {
+		switch block.kind {
+		case "text":
+			if !state.hasTextBlock {
+				continue
+			}
+			if err := state.write(StreamEvent{
+				Type: "stream_event",
+				Event: ContentBlockStopEvent{
+					Type:  "content_block_stop",
+					Index: blockIndex,
+				},
+			}); err != nil {
+				return err
+			}
+		case "tool_use":
+			blockState := state.toolBlocks[block.toolIndex]
+			if blockState == nil || blockState.stopped {
+				continue
+			}
+			blockState.stopped = true
+			if err := state.write(StreamEvent{
+				Type: "stream_event",
+				Event: ContentBlockStopEvent{
+					Type:  "content_block_stop",
+					Index: blockIndex,
+				},
+			}); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -381,9 +387,19 @@ func (state *openAIStreamState) buildMessage() (Message, bool, error) {
 	if len(blocks) == 0 {
 		return Message{}, false, nil
 	}
+	stopReason := mapFinishReason(state.finishReason)
+	var stopSequence *string
+	if stopReason == "stop_sequence" {
+		stopSequence = StringPointer("")
+	}
 	return Message{
-		Role:    "assistant",
-		Content: blocks,
+		ID:           state.messageID,
+		Type:         "message",
+		Model:        state.model,
+		Role:         "assistant",
+		StopReason:   stopReason,
+		StopSequence: stopSequence,
+		Content:      blocks,
 	}, true, nil
 }
 

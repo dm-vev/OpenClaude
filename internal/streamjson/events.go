@@ -15,10 +15,26 @@ import (
 
 // Message represents the high-level message payload used in stream-json events.
 type Message struct {
+	// ID is the unique message identifier when provided.
+	ID string `json:"id,omitempty"`
+	// Container reports any container metadata, or null if unused.
+	Container *json.RawMessage `json:"container,omitempty"`
+	// Model names the model that generated the message.
+	Model string `json:"model,omitempty"`
 	// Role is one of user, assistant, or system.
 	Role string `json:"role"`
+	// StopReason indicates why generation stopped.
+	StopReason string `json:"stop_reason,omitempty"`
+	// StopSequence holds the stop sequence when applicable.
+	StopSequence *string `json:"stop_sequence,omitempty"`
+	// Type is always "message" for Claude-style envelopes.
+	Type string `json:"type,omitempty"`
+	// Usage reports token usage for the message when available.
+	Usage *MessageUsage `json:"usage,omitempty"`
 	// Content is either a string or a list of content blocks.
 	Content any `json:"content"`
+	// ContextManagement reports context handling metadata, or null if unused.
+	ContextManagement *json.RawMessage `json:"context_management,omitempty"`
 }
 
 // ContentBlock represents an Anthropic-style content block.
@@ -53,8 +69,42 @@ type AssistantEvent struct {
 	ParentToolUseID any `json:"parent_tool_use_id"`
 	// UUID uniquely identifies the event.
 	UUID string `json:"uuid"`
-	// Error indicates whether the assistant message is an API error placeholder.
-	Error bool `json:"error,omitempty"`
+	// Error optionally carries an error code for synthetic assistant errors.
+	Error string `json:"error,omitempty"`
+}
+
+// MessageUsage represents Claude-style usage details for assistant messages.
+type MessageUsage struct {
+	// InputTokens counts prompt tokens.
+	InputTokens int `json:"input_tokens"`
+	// OutputTokens counts generated tokens.
+	OutputTokens int `json:"output_tokens"`
+	// CacheCreationInputTokens reports cached creation input tokens.
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	// CacheReadInputTokens reports cached read input tokens.
+	CacheReadInputTokens int `json:"cache_read_input_tokens"`
+	// ServerToolUse reports tool request counts handled by the service.
+	ServerToolUse MessageServerToolUse `json:"server_tool_use"`
+	// ServiceTier reports the service tier when available.
+	ServiceTier *string `json:"service_tier"`
+	// CacheCreation reports cache creation usage breakdowns.
+	CacheCreation MessageCacheCreation `json:"cache_creation"`
+}
+
+// MessageServerToolUse reports server-side tool request counts.
+type MessageServerToolUse struct {
+	// WebSearchRequests is the number of web search requests.
+	WebSearchRequests int `json:"web_search_requests"`
+	// WebFetchRequests is the number of web fetch requests.
+	WebFetchRequests int `json:"web_fetch_requests"`
+}
+
+// MessageCacheCreation reports cache creation token usage.
+type MessageCacheCreation struct {
+	// Ephemeral1HInputTokens reports ephemeral 1h cache input tokens.
+	Ephemeral1HInputTokens int `json:"ephemeral_1h_input_tokens"`
+	// Ephemeral5MInputTokens reports ephemeral 5m cache input tokens.
+	Ephemeral5MInputTokens int `json:"ephemeral_5m_input_tokens"`
 }
 
 // UserEvent represents a stream-json user message event.
@@ -420,11 +470,14 @@ type MessageStopEvent struct {
 }
 
 // Writer emits stream-json events as JSON Lines.
+// The writer guarantees each call produces exactly one newline-delimited JSON object.
 type Writer struct {
 	// mu serializes writes to prevent JSON line interleaving.
 	mu sync.Mutex
 	// writer is the underlying output destination.
 	writer io.Writer
+	// afterWrite runs after a JSON line is written when set.
+	afterWrite func(event any) error
 }
 
 // NewWriter constructs a stream-json writer.
@@ -432,7 +485,16 @@ func NewWriter(writer io.Writer) *Writer {
 	return &Writer{writer: writer}
 }
 
+// SetAfterWrite registers a hook invoked after each event is written.
+// The hook is invoked under the write lock so persisted ordering is preserved.
+func (w *Writer) SetAfterWrite(afterWrite func(event any) error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.afterWrite = afterWrite
+}
+
 // Write emits a single event as a JSON line.
+// If the after-write hook fails, the write is treated as failed for callers.
 func (w *Writer) Write(event any) error {
 	var buffer bytes.Buffer
 	encoder := json.NewEncoder(&buffer)
@@ -446,6 +508,11 @@ func (w *Writer) Write(event any) error {
 	if _, err := w.writer.Write(buffer.Bytes()); err != nil {
 		return fmt.Errorf("write stream-json event: %w", err)
 	}
+	if w.afterWrite != nil {
+		if err := w.afterWrite(event); err != nil {
+			return fmt.Errorf("after-write hook: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -454,9 +521,13 @@ func NewUUID() string {
 	return uuid.NewString()
 }
 
+// StandardServiceTier is the default service tier label in Claude Code output.
+const StandardServiceTier = "standard"
+
 // BuildTextMessage constructs a message containing a single text block.
 func BuildTextMessage(role string, text string) Message {
 	return Message{
+		Type: "message",
 		Role: role,
 		Content: []ContentBlock{
 			{Type: "text", Text: text},
@@ -480,6 +551,7 @@ func BuildToolUseMessage(toolCalls []openai.ToolCall) Message {
 		})
 	}
 	return Message{
+		Type:    "message",
 		Role:    "assistant",
 		Content: blocks,
 	}
@@ -488,6 +560,7 @@ func BuildToolUseMessage(toolCalls []openai.ToolCall) Message {
 // BuildToolResultMessage constructs a user message containing tool_result blocks.
 func BuildToolResultMessage(toolCallID string, content string, isError bool) Message {
 	return Message{
+		Type: "message",
 		Role: "user",
 		Content: []ContentBlock{
 			{
@@ -521,7 +594,7 @@ func BuildAssistantMessage(message openai.Message) Message {
 		}
 	}
 	if len(blocks) > 0 {
-		return Message{Role: "assistant", Content: blocks}
+		return Message{Type: "message", Role: "assistant", Content: blocks}
 	}
 	raw, err := json.Marshal(message.Content)
 	if err != nil {
@@ -540,6 +613,67 @@ func BuildUserMessage(message openai.Message) Message {
 		return BuildTextMessage("user", fmt.Sprintf("%v", message.Content))
 	}
 	return BuildTextMessage("user", string(raw))
+}
+
+// NewMessageUsageFromOpenAI converts OpenAI usage data into a Claude-style usage payload.
+// Cache and server tool usage fields are zeroed when the gateway does not provide them.
+func NewMessageUsageFromOpenAI(usage openai.Usage, serviceTier string) *MessageUsage {
+	var tier *string
+	if serviceTier != "" {
+		tier = StringPointer(serviceTier)
+	}
+	return &MessageUsage{
+		InputTokens:              usage.PromptTokens,
+		OutputTokens:             usage.CompletionTokens,
+		CacheCreationInputTokens: 0,
+		CacheReadInputTokens:     0,
+		ServerToolUse: MessageServerToolUse{
+			WebSearchRequests: 0,
+			WebFetchRequests:  0,
+		},
+		ServiceTier: tier,
+		CacheCreation: MessageCacheCreation{
+			Ephemeral1HInputTokens: 0,
+			Ephemeral5MInputTokens: 0,
+		},
+	}
+}
+
+// NewEmptyMessageUsage returns a zeroed usage payload.
+// This is used for synthetic assistant/result events that must still carry usage fields.
+func NewEmptyMessageUsage(serviceTier string) *MessageUsage {
+	var tier *string
+	if serviceTier != "" {
+		tier = StringPointer(serviceTier)
+	}
+	return &MessageUsage{
+		InputTokens:              0,
+		OutputTokens:             0,
+		CacheCreationInputTokens: 0,
+		CacheReadInputTokens:     0,
+		ServerToolUse: MessageServerToolUse{
+			WebSearchRequests: 0,
+			WebFetchRequests:  0,
+		},
+		ServiceTier: tier,
+		CacheCreation: MessageCacheCreation{
+			Ephemeral1HInputTokens: 0,
+			Ephemeral5MInputTokens: 0,
+		},
+	}
+}
+
+// NewNullRawMessage returns a JSON "null" payload pointer.
+// Use this to force a null value to be emitted when omitempty is present.
+func NewNullRawMessage() *json.RawMessage {
+	value := json.RawMessage("null")
+	return &value
+}
+
+// StringPointer returns a pointer to the provided string.
+// It avoids allocating temporary variables at call sites.
+func StringPointer(value string) *string {
+	return &value
 }
 
 // ExtractText extracts text content from an Anthropic-style content array.

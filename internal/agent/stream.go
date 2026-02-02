@@ -155,6 +155,11 @@ func (r *Runner) RunStream(
 				}
 			}
 
+			// Respect session-level plan mode markers before executing tools.
+			if tools.IsPlanMode(r.ToolContext.Store, r.ToolContext.SessionID) && call.Function.Name != "ExitPlanMode" {
+				return nil, ErrPlanMode
+			}
+
 			// Plan mode must not execute any tools.
 			if r.Permissions.Mode == tools.PermissionPlan {
 				return nil, ErrPlanMode
