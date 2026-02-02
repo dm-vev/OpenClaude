@@ -62,7 +62,7 @@ Interactive session:
 ```bash
 ./bin/claude
 ```
-Interactive mode launches a full-screen TUI with chat history, tool activity, markdown rendering, and an input box.
+Interactive mode launches a full-screen TUI with chat history, tool activity, markdown rendering, slash-command typeahead, bash mode (`!`), paste placeholders, and a message selector (`Esc`) for forking.
 
 Print mode (one-shot):
 
