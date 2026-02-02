@@ -6,6 +6,10 @@ OpenClaude is a drop-in replacement for the **Claude Code** `claude` CLI that le
 
 This repository is currently in early scaffolding. The primary goal is to reach CLI+config compatibility first; anything not implemented yet should fail loudly and clearly.
 
+## Compatibility Reference
+
+The canonical stream-json reference is `cli.js`. The current target version and notes live in `docs/compat.md` and `docs/compat/claude-latest.md`.
+
 ## Goals
 
 - Drop-in CLI compatibility with `claude` (interactive and `--print` modes).
@@ -58,6 +62,7 @@ Interactive session:
 ```bash
 ./bin/claude
 ```
+Interactive mode launches a full-screen TUI with chat history, tool activity, markdown rendering, and an input box.
 
 Print mode (one-shot):
 
@@ -94,6 +99,17 @@ Key behaviors to support early:
 - Tool gating: `--tools`, `--allowedTools`, `--disallowedTools`, `--permission-mode`.
 - Stream-json auth updates: `--enable-auth-status`.
 - Stream-json hooks and keep-alives: `hook_started`/`hook_response` system events and `keep_alive` heartbeats.
+
+## Tools
+
+OpenClaude reports the Claude Code tool list in `system:init`. Implemented tools:
+`Read`, `Edit`, `Write`, `Bash`, `Glob`, `Grep`, `NotebookEdit`, `WebFetch`,
+`WebSearch`, `TodoWrite`, `Task`, `TaskOutput`, `TaskStop`, `AskUserQuestion`,
+`EnterPlanMode`, `ExitPlanMode`, `Skill`. Notes:
+- `Task` executes a sub-run and persists metadata; async payload flags (`async`, `background`, `detached`, `run_in_background`) run in the background with `TaskOutput` returning latest output when `output` is omitted and `TaskStop` attempting cancellation.
+- `AskUserQuestion` requires an interactive TTY or `OPENCLOUDE_ASK_RESPONSE`.
+- `EnterPlanMode`/`ExitPlanMode` toggle a session marker; permission mode flags still apply.
+- `Skill` loads local files from `.openclaude/skills` or `skills` under the project root.
 
 ## Roadmap (high level)
 

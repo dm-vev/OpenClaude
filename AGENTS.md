@@ -4,6 +4,12 @@ OpenClaude is a drop-in CLI replacement for **Claude Code** that routes all mode
 
 This file defines repo-wide rules for contributors and coding agents.
 
+## Execution Discipline (Non-Negotiable)
+
+- Do not stop or wait for user input once work begins; continue until all assigned work is complete.
+- If primary tasks are done, immediately shift to polishing: tests, docs, edge cases, and cleanup.
+- Do not pause for confirmation; make conservative choices, document assumptions, and proceed.
+
 ## Project Structure
 
 Prefer standard Go layout:
